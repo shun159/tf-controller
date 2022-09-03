@@ -7,6 +7,7 @@ from builtins import map
 from builtins import str
 from builtins import range
 from builtins import object
+from operator import ne
 from past.utils import old_div
 import os
 import sys
@@ -3706,6 +3707,153 @@ class TestIpAlloc(test_case.ApiServerTestCase):
                 self._vnc_lib.alias_ip_delete,
                 aip_id,
                 ipam_sn_v4)
+
+
+    def test_alloc_2nd_addr_as_dns_server_address(self):
+        # Create Project
+        project = Project('my-v4-proj-%s' %(self.id()), Domain())
+        self._vnc_lib.project_create(project)
+
+        # Create subnets
+        #
+        # https://gerrit.tungsten.io/r/c/tungstenfabric/tf-controller/+/68458
+        #
+        # 1. for test case for avoid to reserve 2nd IP address as DNS server (this is reported test case on gerrit)
+        # This case is to evaluate that in case of given an object the customer created, check if the allocation logic would be work or not as intended.
+        #  - enable_dhcp: False
+        #  - dns_server_address: 0.0.0.0
+        #  - default_gateway: 0.0.0.0 /* I don't specify this option, because this test case is focusing on behaviour of reservation of 2nd Address */
+        #
+        ipam1_sn = IpamSubnetType(subnet=SubnetType('11.1.1.0', 24), enable_dhcp=False, dns_server_address='0.0.0.0', addr_from_start=True)
+
+        # 2. for test case for reserve 2nd IP address as DNS server. dns_server_address with None
+        # this test case is check how the 2nd condition handle this object in the if clause.
+        ipam2_sn = IpamSubnetType(subnet=SubnetType('12.1.1.0', 24), enable_dhcp=False, addr_from_start=True)
+
+        # 3. for test case for reserve 2nd IP address as DNS server. dns_server_address with 'None'
+        # In this case, let's see the 3rd condition on the if clause how handle this object.
+        ipam3_sn = IpamSubnetType(subnet=SubnetType('13.1.1.0', 24), enable_dhcp=False, dns_server_address='None', addr_from_start=True)
+
+        # 4. for test case for reserve 2nd IP address as DNS server. 
+        # in this case, first of all, Create a subnet object with dns_server_address with 0.0.0.0 and enable_dhcp with True.
+        # second, simply call the ipam_update API. The 2nd Address SHOULD BE reserved.
+        ipam4_sn = IpamSubnetType(subnet=SubnetType('14.1.1.0', 24), dns_server_address='0.0.0.0', enable_dhcp=True, addr_from_start=True)
+
+        # 5. for test case for reserve 2nd IP address as DNS server. 
+        # This test case does not correspond to any of the conditions in the if clause.
+        #
+        # In this case, first of all, Create a subnet object with dns_server_address with 0.0.0.0 and enable_dhcp with False.
+        # Second, simply call the ipam_update API. The 2nd Address SHOULD NOT BE reserved.
+        ipam5_sn = IpamSubnetType(subnet=SubnetType('15.1.1.0', 24), dns_server_address='0.0.0.0', enable_dhcp=False, addr_from_start=True)
+
+        # declare IPAMs
+        ipam1 = NetworkIpam('ipam1', project, IpamType("dhcp"))
+        ipam2 = NetworkIpam('ipam2', project, IpamType("dhcp"))
+        ipam3 = NetworkIpam('ipam3', project, IpamType("dhcp"))
+        ipam4 = NetworkIpam('ipam4', project, IpamType("dhcp"))
+        ipam5 = NetworkIpam('ipam5', project, IpamType("dhcp"))
+
+        # create ipams
+        self._vnc_lib.network_ipam_create(ipam1)
+        logger.debug('Created ipam1')
+        self._vnc_lib.network_ipam_create(ipam2)
+        logger.debug('Created ipam2')
+        self._vnc_lib.network_ipam_create(ipam3)
+        logger.debug('Created ipam3')
+        self._vnc_lib.network_ipam_create(ipam4)
+        logger.debug('Created ipam4')
+        self._vnc_lib.network_ipam_create(ipam5)
+        logger.debug('Created ipam5')
+
+        # update IPAMs
+        self._vnc_lib.network_ipam_update(ipam4)
+        logger.debug('Updated ipam4')
+        self._vnc_lib.network_ipam_update(ipam5)
+        logger.debug('Updated ipam5')
+
+        # declare virtual networks
+        vn1 = VirtualNetwork('Vnet-1', project)
+        vn2 = VirtualNetwork('Vnet-2', project)
+        vn3 = VirtualNetwork('Vnet-3', project)
+        vn4 = VirtualNetwork('Vnet-4', project)
+        vn5 = VirtualNetwork('Vnet-5', project)
+
+        # add ipam to the virtual networks and attach subnets
+        vn1.add_network_ipam(ipam1, VnSubnetsType([ipam1_sn]))
+        logger.debug('Added ipam1 to vn1')
+
+        vn2.add_network_ipam(ipam2, VnSubnetsType([ipam2_sn]))
+        logger.debug('Added ipam2 to vn2')
+
+        vn3.add_network_ipam(ipam3, VnSubnetsType([ipam3_sn]))
+        logger.debug('Added ipam2 to vn3')
+
+        vn4.add_network_ipam(ipam4, VnSubnetsType([ipam4_sn]))
+        logger.debug('Added ipam2 to vn4')
+
+        vn5.add_network_ipam(ipam4, VnSubnetsType([ipam5_sn]))
+        logger.debug('Added ipam2 to vn5')
+
+        self._vnc_lib.virtual_network_create(vn1)
+        self._vnc_lib.virtual_network_create(vn2)
+        self._vnc_lib.virtual_network_create(vn3)
+        self._vnc_lib.virtual_network_create(vn4)
+        self._vnc_lib.virtual_network_create(vn5)
+
+        # request to allocate an IP address using bulk allocation api
+        net1_obj = self._vnc_lib.virtual_network_read(id = vn1.uuid)
+        subnet1_uuid = net1_obj.network_ipam_refs[0]['attr'].ipam_subnets[0].subnet_uuid
+
+        net2_obj = self._vnc_lib.virtual_network_read(id = vn2.uuid)
+        subnet2_uuid = net2_obj.network_ipam_refs[0]['attr'].ipam_subnets[0].subnet_uuid
+
+        net3_obj = self._vnc_lib.virtual_network_read(id = vn3.uuid)
+        subnet3_uuid = net3_obj.network_ipam_refs[0]['attr'].ipam_subnets[0].subnet_uuid
+
+        net4_obj = self._vnc_lib.virtual_network_read(id = vn4.uuid)
+        subnet4_uuid = net4_obj.network_ipam_refs[0]['attr'].ipam_subnets[0].subnet_uuid
+
+        net5_obj = self._vnc_lib.virtual_network_read(id = vn5.uuid)
+        subnet5_uuid = net5_obj.network_ipam_refs[0]['attr'].ipam_subnets[0].subnet_uuid
+
+        data = {"subnet" : subnet1_uuid, "count" : 1}
+        url = '/virtual-network/%s/ip-alloc' %(vn1.uuid)
+        rv_json = self._vnc_lib._request_server(rest.OP_POST, url, json.dumps(data))
+        self.assertEqual(json.loads(rv_json)['ip_addr'][0], '11.1.1.2')
+
+        data = {"subnet" : subnet2_uuid, "count" : 1}
+        url = '/virtual-network/%s/ip-alloc' %(vn2.uuid)
+        rv_json = self._vnc_lib._request_server(rest.OP_POST, url, json.dumps(data))
+        self.assertEqual(json.loads(rv_json)['ip_addr'][0], '12.1.1.3')
+
+        data = {"subnet" : subnet3_uuid, "count" : 1}
+        url = '/virtual-network/%s/ip-alloc' %(vn3.uuid)
+        rv_json = self._vnc_lib._request_server(rest.OP_POST, url, json.dumps(data))
+        self.assertEqual(json.loads(rv_json)['ip_addr'][0], '13.1.1.3')
+
+        data = {"subnet" : subnet4_uuid, "count" : 1}
+        url = '/virtual-network/%s/ip-alloc' %(vn4.uuid)
+        rv_json = self._vnc_lib._request_server(rest.OP_POST, url, json.dumps(data))
+        self.assertEqual(json.loads(rv_json)['ip_addr'][0], '14.1.1.3')
+
+        data = {"subnet" : subnet5_uuid, "count" : 1}
+        url = '/virtual-network/%s/ip-alloc' %(vn5.uuid)
+        rv_json = self._vnc_lib._request_server(rest.OP_POST, url, json.dumps(data))
+        self.assertEqual(json.loads(rv_json)['ip_addr'][0], '15.1.1.2')
+
+        #cleanup
+        logger.debug('Cleaning up')
+        self._vnc_lib.virtual_network_delete(id=vn1.uuid)
+        self._vnc_lib.virtual_network_delete(id=vn2.uuid)
+        self._vnc_lib.virtual_network_delete(id=vn3.uuid)
+        self._vnc_lib.virtual_network_delete(id=vn4.uuid)
+        self._vnc_lib.virtual_network_delete(id=vn5.uuid)
+        self._vnc_lib.network_ipam_delete(id=ipam1.uuid)
+        self._vnc_lib.network_ipam_delete(id=ipam2.uuid)
+        self._vnc_lib.network_ipam_delete(id=ipam3.uuid)
+        self._vnc_lib.network_ipam_delete(id=ipam4.uuid)
+        self._vnc_lib.network_ipam_delete(id=ipam5.uuid)
+        self._vnc_lib.project_delete(id=project.uuid)
 
 #end class TestIpAlloc
 
